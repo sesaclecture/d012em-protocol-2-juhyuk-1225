@@ -162,8 +162,58 @@ def read_imu() -> Dict[str, int]:
     - MPU6050에서 가속도/자이로 6축 값을 읽어서 dict로 반환
     - {'ax':..., 'ay':..., 'az':..., 'gx':..., 'gy':..., 'gz':...}
     """
-    ax, ay, az = 0, 0, 0
-    gx, gy, gz = 0, 0, 0
+    MPU6050_ADDRESS = 0x68
+    WHO_AM_I = 0x75
+    TEMP_OUT_H = 0x41
+    TEMP_OUT_L = 0x42
+    PWR_MGMT_1 = 0x6B
+    GYRO_XOUT_H = 0x43
+    GYRO_XOUT_L = 0x44
+    GYRO_YOUT_H = 0x45
+    GYRO_YOUT_L = 0x46
+    GYRO_ZOUT_H = 0x47
+    GYRO_ZOUT_L = 0x48
+    ACCEL_XOUT_H = 0x3B
+    ACCEL_XOUT_L = 0x3C
+    ACCEL_YOUT_H = 0x3D
+    ACCEL_YOUT_L = 0x3E
+    ACCEL_ZOUT_H = 0x3F
+    ACCEL_ZOUT_L = 0x40
+
+
+    while True:
+        gyto_x_h = bus.read_byte_data(MPU6050_ADDRESS,GYRO_XOUT_H)
+        gyto_x_l = bus.read_byte_data(MPU6050_ADDRESS,GYRO_XOUT_L)
+        gyto_x = (gyto_x_h << 8) | gyto_x_l
+        if gyto_x > 32768:
+            gyto_x -= 65536
+        gyto_y_h = bus.read_byte_data(MPU6050_ADDRESS,GYRO_YOUT_H)
+        gyto_y_l = bus.read_byte_data(MPU6050_ADDRESS,GYRO_YOUT_L)
+        gyto_y = (gyto_y_h << 8) | gyto_y_l
+        if gyto_y > 32768:
+            gyto_y -= 65536
+        gyto_z_h = bus.read_byte_data(MPU6050_ADDRESS,GYRO_ZOUT_H)
+        gyto_z_l = bus.read_byte_data(MPU6050_ADDRESS,GYRO_ZOUT_L)
+        gyto_z = (gyto_z_h << 8) | gyto_z_l
+        if gyto_z > 32768:
+            gyto_z -= 65536 
+        ACCEL_XOUT_H = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_XOUT_H)
+        ACCEL_XOUT_L = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_XOUT_L)
+        ACCEL_XOUT = (ACCEL_XOUT_H << 8) | ACCEL_XOUT_L
+        if ACCEL_XOUT > 32768:
+            ACCEL_XOUT -= 65536
+        ACCEL_YOUT_H = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_YOUT_H)
+        ACCEL_YOUT_L = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_YOUT_L)
+        ACCEL_YOUT = (ACCEL_YOUT_H << 8) | ACCEL_YOUT_L
+        if ACCEL_YOUT > 32768:
+            ACCEL_YOUT -= 65536
+        ACCEL_ZOUT_H = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_ZOUT_H)
+        ACCEL_ZOUT_L = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_ZOUT_L)
+        ACCEL_ZOUT = (ACCEL_ZOUT_H << 8) | ACCEL_ZOUT_L
+        if ACCEL_ZOUT > 32768:
+            ACCEL_ZOUT -= 65536
+        ax, ay, az = ACCEL_XOUT, ACCEL_YOUT, ACCEL_ZOUT
+        gx, gy, gz = gyto_x, gyto_y, gyto_z
 
     with SMBus(1) as bus:
         # TODO: I2C로 MPU6050에서 6축 값 읽기
