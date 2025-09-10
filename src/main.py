@@ -15,145 +15,31 @@ ssh/sftp 과제
 """
 
 import subprocess
-from enum import IntEnum
 from typing import Dict, Optional, Tuple
 
-try:
-    from smbus2 import SMBus
-except ImportError:
-    SMBus = object
-
-try:
-    import spidev
-except ImportError:
-    spidev = None
+from smbus2 import SMBus
+import spidev
 
 
-class Mpu6050Reg(IntEnum):
-    """MPU6050 레지스터 주소 (필요시 추가)"""
-
-    ADDR = 0x68
-    PWR_MGMT_1 = 0x6B
-    SMPLRT_DIV = 0x19
-    GYRO_CONFIG = 0x1B
-    ACCEL_CONFIG = 0x1C
-    ACCEL_XOUT_H = 0x3B
-    GYRO_XOUT_H = 0x43
-    WHO_AM_I = 0x75
-
-
-class Rc522Reg(IntEnum):
-    """RC522 레지스터 주소 (필요시 추가)"""
-
-    COMMAND = 0x01
-    COMM_IEN = 0x02
-    COMM_IRQ = 0x04
-    ERROR = 0x06
-    STATUS1 = 0x07
-    STATUS2 = 0x08
-    FIFO_DATA = 0x09
-    FIFO_LEVEL = 0x0A
-    CONTROL = 0x0C
-    BIT_FRAMING = 0x0D
-    MODE = 0x11
-    TX_CONTROL = 0x14
-    VERSION = 0x37
-
-
-class Rc522Cmd(IntEnum):
-    """RC522 명령어 (필요시 추가)"""
-
-    IDLE = 0x00
-    TRANSCEIVE = 0x0C
-    SOFT_RESET = 0x0F
-
-
-class Rc522SPI:
-    """아주 작은 RC522 드라이버"""
-
-    def __init__(self):
-        if spidev is None:
-            raise RuntimeError("spidev 미지원 환경입니다.")
-
-        self.spi = spidev.SpiDev()
-        self.spi.open(0, 0)
-        self.spi.max_speed_hz = 1_000_000
-        self.spi.mode = 0
-
-    def close(self):
-        """RC522 SPI 종료"""
-        self.spi.close()
-
-    def write_reg(self, reg: Rc522Reg, val: int):
-        """write"""
-        self.spi.xfer2(
-            [_rc522_addr_byte(int(reg), read=False), int(val) & 0xFF]
-        )
-
-    def read_reg(self, reg: Rc522Reg) -> int:
-        """read"""
-        resp = self.spi.xfer2([_rc522_addr_byte(int(reg), read=True), 0x00])
-        return resp[1] & 0xFF
-
-    def set_bits(self, reg: Rc522Reg, mask: int):
-        """reg의 mask 비트들을 1로 설정"""
-        self.write_reg(reg, self.read_reg(reg) | mask)
-
-    def clear_bits(self, reg: Rc522Reg, mask: int):
-        """reg의 mask 비트들을 0으로 설정"""
-        self.write_reg(reg, self.read_reg(reg) & (~mask & 0xFF))
-
-    def antenna_on(self, on: bool = True):
-        """안테나 드라이브 on/off"""
-        if on:
-            self.set_bits(Rc522Reg.TX_CONTROL, 0x03)
-        else:
-            self.clear_bits(Rc522Reg.TX_CONTROL, 0x03)
-
-    def transceive_7bit(self, tx_byte: int, timeout_loop: int = 50) -> bytes:
-        """REQA(7비트 프레임) 전송 → FIFO 응답 수신 (간단 폴링 구현)"""
-        self.write_reg(Rc522Reg.COMMAND, Rc522Cmd.IDLE)  # 명령어 IDLE
-        self.write_reg(Rc522Reg.COMM_IRQ, 0x7F)  # 모든 IRQ 클리어
-        self.write_reg(Rc522Reg.FIFO_LEVEL, 0x80)  # FIFO Flush
-        self.write_reg(Rc522Reg.FIFO_DATA, tx_byte)  # FIFO에 1바이트 적재
-        self.write_reg(Rc522Reg.BIT_FRAMING, 0x07)  # 7비트 프레임
-        self.write_reg(Rc522Reg.COMMAND, Rc522Cmd.TRANSCEIVE)
-        self.set_bits(Rc522Reg.BIT_FRAMING, 0x80)  # StartSend
-
-        # IRQ 폴링 (RxIRq|IdleIRq)
-        for _ in range(timeout_loop):
-            irq = self.read_reg(Rc522Reg.COMM_IRQ)
-            if irq & 0x30:
-                break
-
-        # 에러 체크, BufferOvfl, ParityErr, ProtocolErr
-        if self.read_reg(Rc522Reg.ERROR) & 0x13:
-            return b""
-
-        # 수신 길이
-        level = self.read_reg(Rc522Reg.FIFO_LEVEL)
-        out = []
-        for _ in range(level):
-            out.append(self.read_reg(Rc522Reg.FIFO_DATA))
-        return bytes(out)
+# =========================
+# I2C (MPU6050)
+# =========================
+MPU_ADDR = 0x68
+REG_PWR_MGMT_1 = 0x6B
+REG_ACCEL_XOUT_H = 0x3B
+REG_ACCEL_YOUT_H = 0x3D
+REG_ACCEL_ZOUT_H = 0x3F
+REG_GYRO_XOUT_H = 0x43
+REG_GYRO_YOUT_H = 0x45
+REG_GYRO_ZOUT_H = 0x47
 
 
 def _read_word(bus: SMBus, addr: int, reg_h: int) -> int:
-    """i2c, 레지스터 2개(High, Low) 읽어서 16bit 정수로 반환"""
+    """MPU6050 16bit signed read"""
     hi = bus.read_byte_data(addr, reg_h)
     lo = bus.read_byte_data(addr, reg_h + 1)
     val = (hi << 8) | lo
-    if val & 0x8000:
-        val = -((0xFFFF - val) + 1)
-    return val
-
-
-def _rc522_addr_byte(addr: int, read: bool) -> int:
-    """RC522 SPI 어드레스 포맷: [addr<<1 | RW | 0] (RW=1이면 Read)"""
-    a = (int(addr) << 1) & 0x7E
-    if read:
-        a |= 0x80
-    return a
+    return val - 65536 if val & 0x8000 else val
 
 
 def read_imu() -> Dict[str, int]:
@@ -162,62 +48,15 @@ def read_imu() -> Dict[str, int]:
     - MPU6050에서 가속도/자이로 6축 값을 읽어서 dict로 반환
     - {'ax':..., 'ay':..., 'az':..., 'gx':..., 'gy':..., 'gz':...}
     """
-    MPU6050_ADDRESS = 0x68
-    WHO_AM_I = 0x75
-    TEMP_OUT_H = 0x41
-    TEMP_OUT_L = 0x42
-    PWR_MGMT_1 = 0x6B
-    GYRO_XOUT_H = 0x43
-    GYRO_XOUT_L = 0x44
-    GYRO_YOUT_H = 0x45
-    GYRO_YOUT_L = 0x46
-    GYRO_ZOUT_H = 0x47
-    GYRO_ZOUT_L = 0x48
-    ACCEL_XOUT_H = 0x3B
-    ACCEL_XOUT_L = 0x3C
-    ACCEL_YOUT_H = 0x3D
-    ACCEL_YOUT_L = 0x3E
-    ACCEL_ZOUT_H = 0x3F
-    ACCEL_ZOUT_L = 0x40
-
-
-    while True:
-        gyto_x_h = bus.read_byte_data(MPU6050_ADDRESS,GYRO_XOUT_H)
-        gyto_x_l = bus.read_byte_data(MPU6050_ADDRESS,GYRO_XOUT_L)
-        gyto_x = (gyto_x_h << 8) | gyto_x_l
-        if gyto_x > 32768:
-            gyto_x -= 65536
-        gyto_y_h = bus.read_byte_data(MPU6050_ADDRESS,GYRO_YOUT_H)
-        gyto_y_l = bus.read_byte_data(MPU6050_ADDRESS,GYRO_YOUT_L)
-        gyto_y = (gyto_y_h << 8) | gyto_y_l
-        if gyto_y > 32768:
-            gyto_y -= 65536
-        gyto_z_h = bus.read_byte_data(MPU6050_ADDRESS,GYRO_ZOUT_H)
-        gyto_z_l = bus.read_byte_data(MPU6050_ADDRESS,GYRO_ZOUT_L)
-        gyto_z = (gyto_z_h << 8) | gyto_z_l
-        if gyto_z > 32768:
-            gyto_z -= 65536 
-        ACCEL_XOUT_H = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_XOUT_H)
-        ACCEL_XOUT_L = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_XOUT_L)
-        ACCEL_XOUT = (ACCEL_XOUT_H << 8) | ACCEL_XOUT_L
-        if ACCEL_XOUT > 32768:
-            ACCEL_XOUT -= 65536
-        ACCEL_YOUT_H = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_YOUT_H)
-        ACCEL_YOUT_L = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_YOUT_L)
-        ACCEL_YOUT = (ACCEL_YOUT_H << 8) | ACCEL_YOUT_L
-        if ACCEL_YOUT > 32768:
-            ACCEL_YOUT -= 65536
-        ACCEL_ZOUT_H = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_ZOUT_H)
-        ACCEL_ZOUT_L = bus.read_byte_data(MPU6050_ADDRESS,ACCEL_ZOUT_L)
-        ACCEL_ZOUT = (ACCEL_ZOUT_H << 8) | ACCEL_ZOUT_L
-        if ACCEL_ZOUT > 32768:
-            ACCEL_ZOUT -= 65536
-        ax, ay, az = ACCEL_XOUT, ACCEL_YOUT, ACCEL_ZOUT
-        gx, gy, gz = gyto_x, gyto_y, gyto_z
-
     with SMBus(1) as bus:
-        # TODO: I2C로 MPU6050에서 6축 값 읽기
-        pass
+        bus.write_byte_data(MPU_ADDR, REG_PWR_MGMT_1, 0x00)  # sleep 해제
+
+        ax = _read_word(bus, MPU_ADDR, REG_ACCEL_XOUT_H)
+        ay = _read_word(bus, MPU_ADDR, REG_ACCEL_YOUT_H)
+        az = _read_word(bus, MPU_ADDR, REG_ACCEL_ZOUT_H)
+        gx = _read_word(bus, MPU_ADDR, REG_GYRO_XOUT_H)
+        gy = _read_word(bus, MPU_ADDR, REG_GYRO_YOUT_H)
+        gz = _read_word(bus, MPU_ADDR, REG_GYRO_ZOUT_H)
 
     return {"ax": ax, "ay": ay, "az": az, "gx": gx, "gy": gy, "gz": gz}
 
@@ -228,11 +67,82 @@ def wake_device() -> Tuple[int, int]:
     - PWM_MGMT_1 전체 register value (before, after) 반환
     """
     with SMBus(1) as bus:
-        # TODO: PWR_MGMT_1 레지스터 읽고, sleep bit 토글
-        before = bus.read_byte_data(Mpu6050Reg.ADDR, Mpu6050Reg.PWR_MGMT_1)
-        verify = "not implemented"
-
+        before = bus.read_byte_data(MPU_ADDR, REG_PWR_MGMT_1) & 0xFF
+        after = before ^ (1 << 6)  # sleep 비트 토글
+        bus.write_byte_data(MPU_ADDR, REG_PWR_MGMT_1, after)
+        verify = bus.read_byte_data(MPU_ADDR, REG_PWR_MGMT_1) & 0xFF
     return before, verify
+
+
+# =========================
+# SPI (RC522)
+# =========================
+RC522_CMD = 0x01
+RC522_COMM_IRQ = 0x04
+RC522_ERROR = 0x06
+RC522_FIFO_DATA = 0x09
+RC522_FIFO_LEVEL = 0x0A
+RC522_BIT_FRAMING = 0x0D
+RC522_TX_CONTROL = 0x14
+
+CMD_IDLE = 0x00
+CMD_TRANSCEIVE = 0x0C
+
+REQA = 0x26  # 7비트 프레임
+
+
+def _rc522_addr(reg: int, read: bool) -> int:
+    a = (reg << 1) & 0x7E
+    return a | 0x80 if read else a
+
+
+class RC522:
+    def __init__(self) -> None:
+        self.spi = spidev.SpiDev()
+        self.spi.open(0, 0)
+        self.spi.max_speed_hz = 1_000_000
+        self.spi.mode = 0
+
+    def close(self) -> None:
+        self.spi.close()
+
+    def write_reg(self, reg: int, val: int) -> None:
+        self.spi.xfer2([_rc522_addr(reg, False), val & 0xFF])
+
+    def read_reg(self, reg: int) -> int:
+        return self.spi.xfer2([_rc522_addr(reg, True), 0x00])[1] & 0xFF
+
+    def set_bits(self, reg: int, mask: int) -> None:
+        self.write_reg(reg, self.read_reg(reg) | mask)
+
+    def clear_bits(self, reg: int, mask: int) -> None:
+        self.write_reg(reg, self.read_reg(reg) & (~mask & 0xFF))
+
+    def antenna_on(self, on: bool) -> None:
+        if on:
+            self.set_bits(RC522_TX_CONTROL, 0x03)
+        else:
+            self.clear_bits(RC522_TX_CONTROL, 0x03)
+
+    def transceive_7bit(self, b: int, loops: int = 50) -> bytes:
+        self.write_reg(RC522_CMD, CMD_IDLE)
+        self.write_reg(RC522_COMM_IRQ, 0x7F)
+        self.write_reg(RC522_FIFO_LEVEL, 0x80)
+        self.write_reg(RC522_FIFO_DATA, b & 0xFF)
+        self.write_reg(RC522_BIT_FRAMING, 0x07)
+        self.write_reg(RC522_CMD, CMD_TRANSCEIVE)
+        self.set_bits(RC522_BIT_FRAMING, 0x80)
+
+        for _ in range(loops):
+            irq = self.read_reg(RC522_COMM_IRQ)
+            if irq & 0x30:
+                break
+
+        if self.read_reg(RC522_ERROR) & 0x13:
+            return b""
+
+        n = self.read_reg(RC522_FIFO_LEVEL)
+        return bytes(self.read_reg(RC522_FIFO_DATA) for _ in range(n))
 
 
 def rfid_poll_once() -> Tuple[bool, Optional[bytes]]:
@@ -241,9 +151,11 @@ def rfid_poll_once() -> Tuple[bool, Optional[bytes]]:
       - RC522로 REQA 전송 → ATQA(2바이트) 응답이면 태그 존재
       - (present, atqa_bytes) 반환
     """
-    r = Rc522SPI()
+    r = RC522()
     try:
-        # TODO: REQA 전송 후 ATQA 수신
+        atqa = r.transceive_7bit(REQA)
+        if len(atqa) == 2:
+            return True, atqa
         return False, None
     finally:
         r.close()
@@ -255,14 +167,17 @@ def rfid_set_antenna(on: bool) -> int:
       - 모듈 레지스터 쓰기 예: 안테나 ON/OFF
       - 쓰고 나서 읽어서 상태(int) 반환 (TX_CONTROL 레지스터)
     """
-    r = Rc522SPI()
+    r = RC522()
     try:
-        # TODO: 안테나 on/off 설정
-        return 0
+        r.antenna_on(on)
+        return r.read_reg(RC522_TX_CONTROL)
     finally:
         r.close()
 
 
+# =========================
+# SSH
+# =========================
 def ssh_get_arch() -> str:
     """
     SSH로 원격에서 architecture 문자열을 받아와 반환.
@@ -270,16 +185,8 @@ def ssh_get_arch() -> str:
     - SSH 실패(returncode!=0)면 RuntimeError
     - 출력이 비정상이거나 arm64 계열이 아니면 AssertionError
     """
-    archs = ("aarch64", "arm64")
-
-    # TODO: user_host, cmd 채우기
-    user_host = ""
-    cmd = ""
-
-    if not user_host or not user_host.strip():
-        raise ValueError("user_host를 반드시 채우세요.")
-    if not cmd or not cmd.strip():
-        raise ValueError("cmd를 반드시 채우세요.")
+    user_host = "pi@raspberrypi.local"  # 실제 Pi 계정/주소로 변경
+    cmd = "uname -m"
 
     result = subprocess.run(
         ["ssh", user_host, cmd],
@@ -294,25 +201,6 @@ def ssh_get_arch() -> str:
     arch = (result.stdout or "").strip()
     if not arch:
         raise ValueError("원격 arch 문자열이 비어 있습니다.")
-
-    if arch not in archs:
+    if arch not in ("aarch64", "arm64"):
         raise AssertionError(f"arm64가 아닙니다: got {arch!r}")
-
     return arch
-
-
-if __name__ == "__main__":
-    imu_data = read_imu()
-    print("IMU Data:", imu_data)
-
-    before_reg, after_reg = wake_device()
-    print(f"Before: {before_reg:#04x}, After: {after_reg:#04x}")
-    print("Device is now", "awake" if not (after_reg & (1 << 6)) else "asleep")
-
-    tag_present, atqa_val = rfid_poll_once()
-    print("Tag present:", tag_present, "ATQA:", atqa_val)
-    tx_control = rfid_set_antenna(True)
-    print(f"TX_CONTROL after antenna on: {tx_control:#04x}")
-
-    ret_arch = ssh_get_arch()
-    print("Remote architecture:", ret_arch)
